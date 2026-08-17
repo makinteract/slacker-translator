@@ -4,12 +4,18 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
-// OpenAI
+// --------------------------------------------------
+// OPENAI
+// --------------------------------------------------
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// Slack
+// --------------------------------------------------
+// SLACK
+// --------------------------------------------------
+
 const app = new App({
   token: process.env.SLACK_BOT_TOKEN,
   appToken: process.env.SLACK_APP_TOKEN,
@@ -17,7 +23,284 @@ const app = new App({
 });
 
 // --------------------------------------------------
-// TRANSLATE MESSAGE SHORTCUT
+// HELPER: TRANSLATE TEXT
+// --------------------------------------------------
+
+async function translateText(text, language) {
+  const response = await openai.responses.create({
+    model: 'gpt-5.6',
+
+    input: `Translate the following text into natural ${language}.
+
+Preserve:
+- meaning
+- tone
+- names
+- URLs
+- Slack mentions
+- formatting
+
+Do not add explanations.
+Return only the translated text.
+
+Text:
+${text}`,
+  });
+
+  return response.output_text.trim();
+}
+
+// --------------------------------------------------
+// HELPER: OPEN TRANSLATION MODAL
+// --------------------------------------------------
+
+async function openTranslationModal({ command, client, language, callbackId }) {
+  const text = command.text.trim();
+
+  // Open immediately so Slack's trigger_id does not expire
+  const modal = await client.views.open({
+    trigger_id: command.trigger_id,
+
+    view: {
+      type: 'modal',
+      callback_id: callbackId,
+
+      private_metadata: JSON.stringify({
+        response_url: command.response_url,
+        user: command.user_id,
+        language,
+      }),
+
+      title: {
+        type: 'plain_text',
+        text: `${language} Translation`,
+      },
+
+      close: {
+        type: 'plain_text',
+        text: 'Cancel',
+      },
+
+      blocks: [
+        {
+          type: 'section',
+          text: {
+            type: 'mrkdwn',
+            text: 'Translating...',
+          },
+        },
+      ],
+    },
+  });
+
+  try {
+    const translation = await translateText(text, language);
+
+    // Replace "Translating..." with an editable input
+    await client.views.update({
+      view_id: modal.view.id,
+
+      view: {
+        type: 'modal',
+        callback_id: callbackId,
+
+        private_metadata: JSON.stringify({
+          response_url: command.response_url,
+          user: command.user_id,
+          language,
+        }),
+
+        title: {
+          type: 'plain_text',
+          text: `${language} Translation`,
+        },
+
+        submit: {
+          type: 'plain_text',
+          text: 'Post',
+        },
+
+        close: {
+          type: 'plain_text',
+          text: 'Cancel',
+        },
+
+        blocks: [
+          {
+            type: 'input',
+            block_id: 'translation',
+
+            label: {
+              type: 'plain_text',
+              text: 'Edit translation',
+            },
+
+            element: {
+              type: 'plain_text_input',
+              action_id: 'text',
+              multiline: true,
+              initial_value: translation,
+            },
+          },
+        ],
+      },
+    });
+  } catch (error) {
+    console.error(`${language} translation error:`, error);
+
+    await client.views.update({
+      view_id: modal.view.id,
+
+      view: {
+        type: 'modal',
+
+        title: {
+          type: 'plain_text',
+          text: `${language} Translation`,
+        },
+
+        close: {
+          type: 'plain_text',
+          text: 'Close',
+        },
+
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: 'Translation failed. Please try again.',
+            },
+          },
+        ],
+      },
+    });
+  }
+}
+
+// --------------------------------------------------
+// HELPER: POST EDITED TRANSLATION
+// --------------------------------------------------
+
+async function postTranslation(view, language) {
+  const metadata = JSON.parse(view.private_metadata);
+
+  const editedTranslation = view.state.values.translation.text.value.trim();
+
+  if (!editedTranslation) {
+    return;
+  }
+
+  const response = await fetch(metadata.response_url, {
+    method: 'POST',
+
+    headers: {
+      'Content-Type': 'application/json',
+    },
+
+    body: JSON.stringify({
+      response_type: 'in_channel',
+      text: `From <@${metadata.user}>:\n${editedTranslation}`,
+    }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+
+    console.error(`${language} Slack post failed:`, response.status, errorText);
+  }
+}
+
+// --------------------------------------------------
+// /ENGLISH
+// --------------------------------------------------
+
+app.command('/english', async ({ command, ack, client, respond }) => {
+  await ack();
+
+  const text = command.text.trim();
+
+  if (!text) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Please enter some text after /english.',
+    });
+
+    return;
+  }
+
+  try {
+    await openTranslationModal({
+      command,
+      client,
+      language: 'English',
+      callbackId: 'english_submit',
+    });
+  } catch (error) {
+    console.error('/english error:', error);
+  }
+});
+
+// --------------------------------------------------
+// /KOREAN
+// --------------------------------------------------
+
+app.command('/korean', async ({ command, ack, client, respond }) => {
+  await ack();
+
+  const text = command.text.trim();
+
+  if (!text) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Please enter some text after /korean.',
+    });
+
+    return;
+  }
+
+  try {
+    await openTranslationModal({
+      command,
+      client,
+      language: 'Korean',
+      callbackId: 'korean_submit',
+    });
+  } catch (error) {
+    console.error('/korean error:', error);
+  }
+});
+
+// --------------------------------------------------
+// ENGLISH MODAL SUBMIT
+// --------------------------------------------------
+
+app.view('english_submit', async ({ ack, view }) => {
+  await ack();
+
+  try {
+    await postTranslation(view, 'English');
+  } catch (error) {
+    console.error('English post error:', error);
+  }
+});
+
+// --------------------------------------------------
+// KOREAN MODAL SUBMIT
+// --------------------------------------------------
+
+app.view('korean_submit', async ({ ack, view }) => {
+  await ack();
+
+  try {
+    await postTranslation(view, 'Korean');
+  } catch (error) {
+    console.error('Korean post error:', error);
+  }
+});
+
+// --------------------------------------------------
+// MESSAGE SHORTCUT
 // --------------------------------------------------
 
 app.shortcut('translate_message', async ({ shortcut, ack, client }) => {
@@ -77,6 +360,7 @@ app.shortcut('translate_message', async ({ shortcut, ack, client }) => {
                 },
                 value: 'English',
               },
+
               {
                 text: {
                   type: 'plain_text',
@@ -93,7 +377,7 @@ app.shortcut('translate_message', async ({ shortcut, ack, client }) => {
 });
 
 // --------------------------------------------------
-// HANDLE TRANSLATION
+// MESSAGE SHORTCUT TRANSLATION
 // --------------------------------------------------
 
 app.view('translate_submit', async ({ ack, view, body, client }) => {
@@ -105,447 +389,89 @@ app.view('translate_submit', async ({ ack, view, body, client }) => {
     view.state.values.language.target_language.selected_option.value;
 
   try {
-    const response = await openai.responses.create({
-      model: 'gpt-5.6',
-
-      input: `Translate the following Slack message into ${language}.
-
-Preserve:
-- meaning
-- tone
-- names
-- URLs
-- Slack mentions
-- formatting
-
-Return only the translated text.
-
-Message:
-${metadata.text}`,
-    });
-
-    const translation = response.output_text;
+    const translation = await translateText(metadata.text, language);
 
     await client.chat.postEphemeral({
       channel: metadata.channel,
       user: body.user.id,
+
       text: `*${language} translation:*\n\n${translation}`,
     });
   } catch (error) {
-    console.error('Translation error:', error);
-
-    await client.chat.postEphemeral({
-      channel: metadata.channel,
-      user: body.user.id,
-      text: 'Translation failed. Please try again.',
-    });
-  }
-});
-
-app.command('/english', async ({ command, ack, respond }) => {
-  await ack();
-
-  const text = command.text.trim();
-
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /english.',
-    });
-    return;
-  }
-
-  try {
-    const response = await openai.responses.create({
-      model: 'gpt-5.6',
-      input: `Translate the following text into natural English.
-
-Return only the translated text.
-
-Text:
-${text}`,
-    });
-
-    await respond({
-      response_type: 'in_channel',
-      text: `From <@${command.user_id}>:\n${response.output_text}`,
-    });
-  } catch (error) {
-    console.error('English translation error:', error);
-
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Translation failed. Please try again.',
-    });
-  }
-});
-
-app.command('/korean', async ({ command, ack, respond }) => {
-  await ack();
-
-  const text = command.text.trim();
-
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /korean.',
-    });
-    return;
-  }
-
-  try {
-    const response = await openai.responses.create({
-      model: 'gpt-5.6',
-      input: `Translate the following text into natural Korean.
-
-Return only the translated text.
-
-Text:
-${text}`,
-    });
-
-    await respond({
-      response_type: 'in_channel',
-      text: `From <@${command.user_id}>:\n${response.output_text}`,
-    });
-  } catch (error) {
-    console.error('Korean translation error:', error);
-
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Translation failed. Please try again.',
-    });
-  }
-});
-
-app.command('/englishdraft', async ({ command, ack, client, respond }) => {
-  await ack();
-
-  const text = command.text.trim();
-
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /englishdraft.',
-    });
-    return;
-  }
-
-  // Open the modal immediately before Slack's trigger expires
-  const modal = await client.views.open({
-    trigger_id: command.trigger_id,
-
-    view: {
-      type: 'modal',
-      callback_id: 'englishdraft_submit',
-
-      private_metadata: JSON.stringify({
-        channel: command.channel_id,
-        user: command.user_id,
-      }),
-
-      title: {
-        type: 'plain_text',
-        text: 'English Draft',
-      },
-
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-      },
-
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: 'Translating...',
-          },
-        },
-      ],
-    },
-  });
-
-  try {
-    const response = await openai.responses.create({
-      model: 'gpt-5.6',
-
-      input: `Translate the following text into natural English.
-
-Preserve:
-- meaning
-- tone
-- names
-- URLs
-- Slack mentions
-- formatting
-
-Return only the translated text.
-
-Text:
-${text}`,
-    });
-
-    const translation = response.output_text.trim();
-
-    await client.views.update({
-      view_id: modal.view.id,
-
-      view: {
-        type: 'modal',
-        callback_id: 'englishdraft_submit',
-
-        private_metadata: JSON.stringify({
-          channel: command.channel_id,
-          user: command.user_id,
-        }),
-
-        title: {
-          type: 'plain_text',
-          text: 'English Draft',
-        },
-
-        submit: {
-          type: 'plain_text',
-          text: 'Post',
-        },
-
-        close: {
-          type: 'plain_text',
-          text: 'Cancel',
-        },
-
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'translation',
-
-            label: {
-              type: 'plain_text',
-              text: 'Edit translation',
-            },
-
-            element: {
-              type: 'plain_text_input',
-              action_id: 'text',
-              multiline: true,
-              initial_value: translation,
-            },
-          },
-        ],
-      },
-    });
-  } catch (error) {
-    console.error('English draft translation error:', error);
-
-    await client.views.update({
-      view_id: modal.view.id,
-
-      view: {
-        type: 'modal',
-        title: {
-          type: 'plain_text',
-          text: 'English Draft',
-        },
-        close: {
-          type: 'plain_text',
-          text: 'Close',
-        },
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: 'Translation failed. Please try again.',
-            },
-          },
-        ],
-      },
-    });
-  }
-});
-
-app.command('/englishdraft', async ({ command, ack, client, respond }) => {
-  await ack();
-
-  const text = command.text.trim();
-
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /englishdraft.',
-    });
-    return;
-  }
-
-  // Open modal immediately before Slack's trigger expires
-  const modal = await client.views.open({
-    trigger_id: command.trigger_id,
-
-    view: {
-      type: 'modal',
-      callback_id: 'englishdraft_submit',
-
-      private_metadata: JSON.stringify({
-        response_url: command.response_url,
-        user: command.user_id,
-      }),
-
-      title: {
-        type: 'plain_text',
-        text: 'English Draft',
-      },
-
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-      },
-
-      blocks: [
-        {
-          type: 'section',
-          text: {
-            type: 'mrkdwn',
-            text: 'Translating...',
-          },
-        },
-      ],
-    },
-  });
-
-  try {
-    const response = await openai.responses.create({
-      model: 'gpt-5.6',
-
-      input: `Translate the following text into natural English.
-
-Preserve:
-- meaning
-- tone
-- names
-- URLs
-- Slack mentions
-- formatting
-
-Return only the translated text.
-
-Text:
-${text}`,
-    });
-
-    const translation = response.output_text.trim();
-
-    await client.views.update({
-      view_id: modal.view.id,
-
-      view: {
-        type: 'modal',
-        callback_id: 'englishdraft_submit',
-
-        private_metadata: JSON.stringify({
-          response_url: command.response_url,
-          user: command.user_id,
-        }),
-
-        title: {
-          type: 'plain_text',
-          text: 'English Draft',
-        },
-
-        submit: {
-          type: 'plain_text',
-          text: 'Post',
-        },
-
-        close: {
-          type: 'plain_text',
-          text: 'Cancel',
-        },
-
-        blocks: [
-          {
-            type: 'input',
-            block_id: 'translation',
-
-            label: {
-              type: 'plain_text',
-              text: 'Edit translation',
-            },
-
-            element: {
-              type: 'plain_text_input',
-              action_id: 'text',
-              multiline: true,
-              initial_value: translation,
-            },
-          },
-        ],
-      },
-    });
-  } catch (error) {
-    console.error('English draft translation error:', error);
-
-    await client.views.update({
-      view_id: modal.view.id,
-
-      view: {
-        type: 'modal',
-
-        title: {
-          type: 'plain_text',
-          text: 'English Draft',
-        },
-
-        close: {
-          type: 'plain_text',
-          text: 'Close',
-        },
-
-        blocks: [
-          {
-            type: 'section',
-            text: {
-              type: 'mrkdwn',
-              text: 'Translation failed. Please try again.',
-            },
-          },
-        ],
-      },
-    });
-  }
-});
-
-app.view('englishdraft_submit', async ({ ack, view }) => {
-  await ack();
-
-  const metadata = JSON.parse(view.private_metadata);
-
-  const editedTranslation = view.state.values.translation.text.value.trim();
-
-  if (!editedTranslation) {
-    return;
-  }
-
-  try {
-    const response = await fetch(metadata.response_url, {
-      method: 'POST',
-
-      headers: {
-        'Content-Type': 'application/json',
-      },
-
-      body: JSON.stringify({
-        response_type: 'in_channel',
-        text: `From <@${metadata.user}>:\n${editedTranslation}`,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error('Slack post failed:', response.status, errorText);
+    console.error('Message translation error:', error);
+
+    try {
+      await client.chat.postEphemeral({
+        channel: metadata.channel,
+        user: body.user.id,
+        text: 'Translation failed. Please try again.',
+      });
+    } catch (slackError) {
+      console.error('Slack error message failed:', slackError);
     }
+  }
+});
+
+app.command('/translate', async ({ command, ack, client, respond }) => {
+  await ack();
+
+  const raw = command.text.trim();
+
+  if (!raw) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Usage: /translate language |> message',
+    });
+    return;
+  }
+
+  const separator = '|>';
+  const separatorIndex = raw.indexOf(separator);
+
+  if (separatorIndex === -1) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Please use: /translate language |> message',
+    });
+    return;
+  }
+
+  const language = raw.slice(0, separatorIndex).trim();
+
+  const text = raw.slice(separatorIndex + separator.length).trim();
+
+  if (!language || !text) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Please use: /translate language |> message',
+    });
+    return;
+  }
+
+  try {
+    await openTranslationModal({
+      command: {
+        ...command,
+        text,
+      },
+      client,
+      language,
+      callbackId: 'generic_translate_submit',
+    });
   } catch (error) {
-    console.error('English draft post error:', error);
+    console.error('/translate error:', error);
+  }
+});
+
+app.view('generic_translate_submit', async ({ ack, view }) => {
+  await ack();
+
+  try {
+    const metadata = JSON.parse(view.private_metadata);
+
+    await postTranslation(view, metadata.language);
+  } catch (error) {
+    console.error('Generic translation post error:', error);
   }
 });
 
