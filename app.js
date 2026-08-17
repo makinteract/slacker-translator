@@ -212,92 +212,54 @@ async function postTranslation(view, language) {
 }
 
 // --------------------------------------------------
-// /ENGLISH
+// HELPER: REGISTER A FIXED-LANGUAGE SLASH COMMAND
+// (e.g. /english, /korean)
 // --------------------------------------------------
 
-app.command('/english', async ({ command, ack, client, respond }) => {
-  await ack();
+function registerLanguageCommand(commandName, language, callbackId) {
+  app.command(commandName, async ({ command, ack, client, respond }) => {
+    await ack();
 
-  const text = command.text.trim();
+    const text = command.text.trim();
 
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /english.',
-    });
+    if (!text) {
+      await respond({
+        response_type: 'ephemeral',
+        text: `Please enter some text after ${commandName}.`,
+      });
 
-    return;
-  }
+      return;
+    }
 
-  try {
-    await openTranslationModal({
-      command,
-      client,
-      language: 'English',
-      callbackId: 'english_submit',
-    });
-  } catch (error) {
-    console.error('/english error:', error);
-  }
-});
+    try {
+      await openTranslationModal({ command, client, language, callbackId });
+    } catch (error) {
+      console.error(`${commandName} error:`, error);
+    }
+  });
+}
 
-// --------------------------------------------------
-// /KOREAN
-// --------------------------------------------------
-
-app.command('/korean', async ({ command, ack, client, respond }) => {
-  await ack();
-
-  const text = command.text.trim();
-
-  if (!text) {
-    await respond({
-      response_type: 'ephemeral',
-      text: 'Please enter some text after /korean.',
-    });
-
-    return;
-  }
-
-  try {
-    await openTranslationModal({
-      command,
-      client,
-      language: 'Korean',
-      callbackId: 'korean_submit',
-    });
-  } catch (error) {
-    console.error('/korean error:', error);
-  }
-});
+registerLanguageCommand('/english', 'English', 'english_submit');
+registerLanguageCommand('/korean', 'Korean', 'korean_submit');
 
 // --------------------------------------------------
-// ENGLISH MODAL SUBMIT
+// HELPER: REGISTER A FIXED-LANGUAGE MODAL SUBMIT
 // --------------------------------------------------
 
-app.view('english_submit', async ({ ack, view }) => {
-  await ack();
+function registerLanguageSubmit(callbackId, language) {
+  app.view(callbackId, async ({ ack, view }) => {
+    await ack();
 
-  try {
-    await postTranslation(view, 'English');
-  } catch (error) {
-    console.error('English post error:', error);
-  }
-});
+    try {
+      await postTranslation(view, language);
+    } catch (error) {
+      console.error(`${language} post error:`, error);
+    }
+  });
+}
 
-// --------------------------------------------------
-// KOREAN MODAL SUBMIT
-// --------------------------------------------------
-
-app.view('korean_submit', async ({ ack, view }) => {
-  await ack();
-
-  try {
-    await postTranslation(view, 'Korean');
-  } catch (error) {
-    console.error('Korean post error:', error);
-  }
-});
+registerLanguageSubmit('english_submit', 'English');
+registerLanguageSubmit('korean_submit', 'Korean');
 
 // --------------------------------------------------
 // MESSAGE SHORTCUT
