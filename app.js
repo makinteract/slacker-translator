@@ -2,15 +2,39 @@ import { App } from '@slack/bolt';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
+import { deleteUserApiKey, getUserApiKey, setUserApiKey } from './keyStore.js';
+
 dotenv.config();
 
 // --------------------------------------------------
 // OPENAI
 // --------------------------------------------------
 
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+// Shared fallback client, used when a user has not set a personal key.
+const sharedOpenAI = process.env.OPENAI_API_KEY
+  ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
+  : null;
+
+// Cache of per-user OpenAI clients, keyed by Slack user ID.
+const userOpenAIClients = new Map();
+
+function getOpenAIClient(userId) {
+  const userApiKey = getUserApiKey(userId);
+
+  if (!userApiKey) {
+    return sharedOpenAI;
+  }
+
+  if (!userOpenAIClients.has(userId)) {
+    userOpenAIClients.set(userId, new OpenAI({ apiKey: userApiKey }));
+  }
+
+  return userOpenAIClients.get(userId);
+}
+
+function forgetOpenAIClient(userId) {
+  userOpenAIClients.delete(userId);
+}
 
 // --------------------------------------------------
 // SLACK
@@ -26,8 +50,14 @@ const app = new App({
 // HELPER: TRANSLATE TEXT
 // --------------------------------------------------
 
-async function translateText(text, language) {
-  const response = await openai.responses.create({
+async function translateText(text, language, userId) {
+  const client = getOpenAIClient(userId);
+
+  if (!client) {
+    throw new Error('NO_API_KEY');
+  }
+
+  const response = await client.responses.create({
     model: 'gpt-5.6',
 
     input: `Translate the following text into natural ${language}.
@@ -94,7 +124,7 @@ async function openTranslationModal({ command, client, language, callbackId }) {
   });
 
   try {
-    const translation = await translateText(text, language);
+    const translation = await translateText(text, language, command.user_id);
 
     // Replace "Translating..." with an editable input
     await client.views.update({
@@ -148,6 +178,11 @@ async function openTranslationModal({ command, client, language, callbackId }) {
   } catch (error) {
     console.error(`${language} translation error:`, error);
 
+    const failureText =
+      error.message === 'NO_API_KEY'
+        ? 'No OpenAI API key is configured. Run `/setkey` to add your own, or ask an admin to set one up.'
+        : `Translation failed: ${error.message}`;
+
     await client.views.update({
       view_id: modal.view.id,
 
@@ -169,7 +204,7 @@ async function openTranslationModal({ command, client, language, callbackId }) {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: 'Translation failed. Please try again.',
+              text: failureText,
             },
           },
         ],
@@ -262,115 +297,133 @@ registerLanguageSubmit('english_submit', 'English');
 registerLanguageSubmit('korean_submit', 'Korean');
 
 // --------------------------------------------------
-// MESSAGE SHORTCUT
+// PERSONAL OPENAI API KEY
 // --------------------------------------------------
 
-app.shortcut('translate_message', async ({ shortcut, ack, client }) => {
+app.command('/setkey', async ({ command, ack, client }) => {
   await ack();
-
-  await client.views.open({
-    trigger_id: shortcut.trigger_id,
-
-    view: {
-      type: 'modal',
-      callback_id: 'translate_submit',
-
-      private_metadata: JSON.stringify({
-        text: shortcut.message.text,
-        channel: shortcut.channel.id,
-      }),
-
-      title: {
-        type: 'plain_text',
-        text: 'Translate',
-      },
-
-      submit: {
-        type: 'plain_text',
-        text: 'Translate',
-      },
-
-      close: {
-        type: 'plain_text',
-        text: 'Cancel',
-      },
-
-      blocks: [
-        {
-          type: 'input',
-          block_id: 'language',
-
-          label: {
-            type: 'plain_text',
-            text: 'Translate to',
-          },
-
-          element: {
-            type: 'static_select',
-            action_id: 'target_language',
-
-            placeholder: {
-              type: 'plain_text',
-              text: 'Choose a language',
-            },
-
-            options: [
-              {
-                text: {
-                  type: 'plain_text',
-                  text: 'English',
-                },
-                value: 'English',
-              },
-
-              {
-                text: {
-                  type: 'plain_text',
-                  text: 'Korean',
-                },
-                value: 'Korean',
-              },
-            ],
-          },
-        },
-      ],
-    },
-  });
-});
-
-// --------------------------------------------------
-// MESSAGE SHORTCUT TRANSLATION
-// --------------------------------------------------
-
-app.view('translate_submit', async ({ ack, view, body, client }) => {
-  await ack();
-
-  const metadata = JSON.parse(view.private_metadata);
-
-  const language =
-    view.state.values.language.target_language.selected_option.value;
 
   try {
-    const translation = await translateText(metadata.text, language);
+    await client.views.open({
+      trigger_id: command.trigger_id,
 
-    await client.chat.postEphemeral({
-      channel: metadata.channel,
-      user: body.user.id,
+      view: {
+        type: 'modal',
+        callback_id: 'setkey_submit',
 
-      text: `*${language} translation:*\n\n${translation}`,
+        private_metadata: JSON.stringify({
+          user: command.user_id,
+        }),
+
+        title: {
+          type: 'plain_text',
+          text: 'OpenAI API Key',
+        },
+
+        submit: {
+          type: 'plain_text',
+          text: 'Save',
+        },
+
+        close: {
+          type: 'plain_text',
+          text: 'Cancel',
+        },
+
+        blocks: [
+          {
+            type: 'section',
+            text: {
+              type: 'mrkdwn',
+              text: 'Paste your personal OpenAI API key. It will be used instead of the shared bot key for your translations. Run `/removekey` to delete it later.',
+            },
+          },
+          {
+            type: 'input',
+            block_id: 'api_key',
+
+            label: {
+              type: 'plain_text',
+              text: 'API key',
+            },
+
+            element: {
+              type: 'plain_text_input',
+              action_id: 'value',
+
+              placeholder: {
+                type: 'plain_text',
+                text: 'sk-...',
+              },
+            },
+          },
+        ],
+      },
     });
   } catch (error) {
-    console.error('Message translation error:', error);
+    console.error('/setkey error:', error);
+  }
+});
+
+app.view('setkey_submit', async ({ ack, view, client }) => {
+  const metadata = JSON.parse(view.private_metadata);
+  const apiKey = view.state.values.api_key.value.value.trim();
+
+  if (!apiKey.startsWith('sk-')) {
+    await ack({
+      response_action: 'errors',
+      errors: {
+        api_key: 'That doesn\'t look like a valid OpenAI API key (it should start with "sk-").',
+      },
+    });
+
+    return;
+  }
+
+  await ack();
+
+  try {
+    setUserApiKey(metadata.user, apiKey);
+    forgetOpenAIClient(metadata.user);
+
+    await client.chat.postMessage({
+      channel: metadata.user,
+      text: 'Your personal OpenAI API key has been saved. It will be used for your translations from now on.',
+    });
+  } catch (error) {
+    console.error('/setkey save error:', error);
 
     try {
-      await client.chat.postEphemeral({
-        channel: metadata.channel,
-        user: body.user.id,
-        text: 'Translation failed. Please try again.',
+      await client.chat.postMessage({
+        channel: metadata.user,
+        text: `Something went wrong saving your API key: ${error.message}`,
       });
     } catch (slackError) {
       console.error('Slack error message failed:', slackError);
     }
+  }
+});
+
+app.command('/removekey', async ({ command, ack, respond }) => {
+  await ack();
+
+  try {
+    const removed = deleteUserApiKey(command.user_id);
+    forgetOpenAIClient(command.user_id);
+
+    await respond({
+      response_type: 'ephemeral',
+      text: removed
+        ? 'Your personal OpenAI API key has been removed. Translations will use the shared bot key, if configured.'
+        : 'You don\'t have a personal OpenAI API key set.',
+    });
+  } catch (error) {
+    console.error('/removekey error:', error);
+
+    await respond({
+      response_type: 'ephemeral',
+      text: `Something went wrong removing your API key: ${error.message}`,
+    });
   }
 });
 
