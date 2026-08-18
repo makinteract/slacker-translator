@@ -8,14 +8,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 // --------------------------------------------------
-// Per-user OpenAI API key storage, encrypted at rest.
+// Per-space (per-workspace) OpenAI API key storage, encrypted at rest.
 //
-// Keys are stored in data/user-keys.json, keyed by Slack user ID.
+// Keys are stored in data/space-keys.json, keyed by Slack team/workspace ID.
 // Each value is AES-256-GCM ciphertext, encrypted with a key derived
 // from KEY_STORE_SECRET (set in .env).
 // --------------------------------------------------
 
-const STORE_PATH = path.join(process.cwd(), 'data', 'user-keys.json');
+const STORE_PATH = path.join(process.cwd(), 'data', 'space-keys.json');
 const ALGORITHM = 'aes-256-gcm';
 const SALT = 'slack-translator-key-store';
 
@@ -24,7 +24,7 @@ function getEncryptionKey() {
 
   if (!passphrase) {
     throw new Error(
-      'KEY_STORE_SECRET is not set. Add it to your .env to enable per-user OpenAI keys.'
+      'KEY_STORE_SECRET is not set. Add it to your .env to enable per-space OpenAI keys.'
     );
   }
 
@@ -39,7 +39,7 @@ function loadStore() {
   try {
     return JSON.parse(readFileSync(STORE_PATH, 'utf8'));
   } catch (error) {
-    console.error('Failed to read user key store:', error);
+    console.error('Failed to read space key store:', error);
     return {};
   }
 }
@@ -88,15 +88,15 @@ function decrypt(record) {
 // PUBLIC API
 // --------------------------------------------------
 
-export function setUserApiKey(userId, apiKey) {
+export function setSpaceApiKey(teamId, apiKey) {
   const store = loadStore();
-  store[userId] = encrypt(apiKey);
+  store[teamId] = encrypt(apiKey);
   saveStore(store);
 }
 
-export function getUserApiKey(userId) {
+export function getSpaceApiKey(teamId) {
   const store = loadStore();
-  const record = store[userId];
+  const record = store[teamId];
 
   if (!record) {
     return null;
@@ -105,19 +105,19 @@ export function getUserApiKey(userId) {
   try {
     return decrypt(record);
   } catch (error) {
-    console.error(`Failed to decrypt API key for user ${userId}:`, error);
+    console.error(`Failed to decrypt API key for space ${teamId}:`, error);
     return null;
   }
 }
 
-export function deleteUserApiKey(userId) {
+export function deleteSpaceApiKey(teamId) {
   const store = loadStore();
 
-  if (!(userId in store)) {
+  if (!(teamId in store)) {
     return false;
   }
 
-  delete store[userId];
+  delete store[teamId];
   saveStore(store);
 
   return true;

@@ -2,7 +2,7 @@ import { App } from '@slack/bolt';
 import OpenAI from 'openai';
 import dotenv from 'dotenv';
 
-import { deleteUserApiKey, getUserApiKey, setUserApiKey } from './keyStore.js';
+import { deleteSpaceApiKey, getSpaceApiKey, setSpaceApiKey } from './keyStore.js';
 
 dotenv.config();
 
@@ -10,30 +10,44 @@ dotenv.config();
 // OPENAI
 // --------------------------------------------------
 
-// Shared fallback client, used when a user has not set a personal key.
+// Shared fallback client, used when a space has not set its own key.
 const sharedOpenAI = process.env.OPENAI_API_KEY
   ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
   : null;
 
-// Cache of per-user OpenAI clients, keyed by Slack user ID.
-const userOpenAIClients = new Map();
+// Cache of per-space OpenAI clients, keyed by Slack team/workspace ID.
+const spaceOpenAIClients = new Map();
 
-function getOpenAIClient(userId) {
-  const userApiKey = getUserApiKey(userId);
+function getOpenAIClient(teamId) {
+  const spaceApiKey = getSpaceApiKey(teamId);
 
-  if (!userApiKey) {
+  if (!spaceApiKey) {
     return sharedOpenAI;
   }
 
-  if (!userOpenAIClients.has(userId)) {
-    userOpenAIClients.set(userId, new OpenAI({ apiKey: userApiKey }));
+  if (!spaceOpenAIClients.has(teamId)) {
+    spaceOpenAIClients.set(teamId, new OpenAI({ apiKey: spaceApiKey }));
   }
 
-  return userOpenAIClients.get(userId);
+  return spaceOpenAIClients.get(teamId);
 }
 
-function forgetOpenAIClient(userId) {
-  userOpenAIClients.delete(userId);
+function forgetOpenAIClient(teamId) {
+  spaceOpenAIClients.delete(teamId);
+}
+
+// --------------------------------------------------
+// HELPER: CHECK WORKSPACE ADMIN
+// --------------------------------------------------
+
+async function isWorkspaceAdmin(client, userId) {
+  try {
+    const { user } = await client.users.info({ user: userId });
+    return Boolean(user?.is_admin || user?.is_owner || user?.is_primary_owner);
+  } catch (error) {
+    console.error('users.info failed while checking admin status:', error);
+    return false;
+  }
 }
 
 // --------------------------------------------------
@@ -50,8 +64,8 @@ const app = new App({
 // HELPER: TRANSLATE TEXT
 // --------------------------------------------------
 
-async function translateText(text, language, userId) {
-  const client = getOpenAIClient(userId);
+async function translateText(text, language, teamId) {
+  const client = getOpenAIClient(teamId);
 
   if (!client) {
     throw new Error('NO_API_KEY');
@@ -124,7 +138,7 @@ async function openTranslationModal({ command, client, language, callbackId }) {
   });
 
   try {
-    const translation = await translateText(text, language, command.user_id);
+    const translation = await translateText(text, language, command.team_id);
 
     // Replace "Translating..." with an editable input
     await client.views.update({
@@ -180,7 +194,7 @@ async function openTranslationModal({ command, client, language, callbackId }) {
 
     const failureText =
       error.message === 'NO_API_KEY'
-        ? 'No OpenAI API key is configured. Run `/setkey` to add your own, or ask an admin to set one up.'
+        ? 'No OpenAI API key is configured for this workspace. Ask a workspace admin to run `/setkey`.'
         : `Translation failed: ${error.message}`;
 
     await client.views.update({
@@ -297,11 +311,23 @@ registerLanguageSubmit('english_submit', 'English');
 registerLanguageSubmit('korean_submit', 'Korean');
 
 // --------------------------------------------------
-// PERSONAL OPENAI API KEY
+// WORKSPACE OPENAI API KEY
+// (admin/owner only — the key applies to the whole space)
 // --------------------------------------------------
 
-app.command('/setkey', async ({ command, ack, client }) => {
+app.command('/setkey', async ({ command, ack, client, respond }) => {
   await ack();
+
+  const admin = await isWorkspaceAdmin(client, command.user_id);
+
+  if (!admin) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Only workspace admins or owners can set the shared OpenAI API key.',
+    });
+
+    return;
+  }
 
   try {
     await client.views.open({
@@ -312,6 +338,7 @@ app.command('/setkey', async ({ command, ack, client }) => {
         callback_id: 'setkey_submit',
 
         private_metadata: JSON.stringify({
+          team: command.team_id,
           user: command.user_id,
         }),
 
@@ -335,7 +362,7 @@ app.command('/setkey', async ({ command, ack, client }) => {
             type: 'section',
             text: {
               type: 'mrkdwn',
-              text: 'Paste your personal OpenAI API key. It will be used instead of the shared bot key for your translations. Run `/removekey` to delete it later.',
+              text: 'Paste an OpenAI API key for this workspace. It will be used instead of the shared bot key for every translation in this space. Run `/removekey` to delete it later.',
             },
           },
           {
@@ -383,12 +410,12 @@ app.view('setkey_submit', async ({ ack, view, client }) => {
   await ack();
 
   try {
-    setUserApiKey(metadata.user, apiKey);
-    forgetOpenAIClient(metadata.user);
+    setSpaceApiKey(metadata.team, apiKey);
+    forgetOpenAIClient(metadata.team);
 
     await client.chat.postMessage({
       channel: metadata.user,
-      text: 'Your personal OpenAI API key has been saved. It will be used for your translations from now on.',
+      text: 'The workspace OpenAI API key has been saved. It will be used for every translation in this space from now on.',
     });
   } catch (error) {
     console.error('/setkey save error:', error);
@@ -396,7 +423,7 @@ app.view('setkey_submit', async ({ ack, view, client }) => {
     try {
       await client.chat.postMessage({
         channel: metadata.user,
-        text: `Something went wrong saving your API key: ${error.message}`,
+        text: `Something went wrong saving the workspace API key: ${error.message}`,
       });
     } catch (slackError) {
       console.error('Slack error message failed:', slackError);
@@ -404,25 +431,36 @@ app.view('setkey_submit', async ({ ack, view, client }) => {
   }
 });
 
-app.command('/removekey', async ({ command, ack, respond }) => {
+app.command('/removekey', async ({ command, ack, client, respond }) => {
   await ack();
 
+  const admin = await isWorkspaceAdmin(client, command.user_id);
+
+  if (!admin) {
+    await respond({
+      response_type: 'ephemeral',
+      text: 'Only workspace admins or owners can remove the shared OpenAI API key.',
+    });
+
+    return;
+  }
+
   try {
-    const removed = deleteUserApiKey(command.user_id);
-    forgetOpenAIClient(command.user_id);
+    const removed = deleteSpaceApiKey(command.team_id);
+    forgetOpenAIClient(command.team_id);
 
     await respond({
       response_type: 'ephemeral',
       text: removed
-        ? 'Your personal OpenAI API key has been removed. Translations will use the shared bot key, if configured.'
-        : 'You don\'t have a personal OpenAI API key set.',
+        ? 'The workspace OpenAI API key has been removed. Translations will use the shared bot key, if configured.'
+        : 'This workspace doesn\'t have its own OpenAI API key set.',
     });
   } catch (error) {
     console.error('/removekey error:', error);
 
     await respond({
       response_type: 'ephemeral',
-      text: `Something went wrong removing your API key: ${error.message}`,
+      text: `Something went wrong removing the workspace API key: ${error.message}`,
     });
   }
 });
