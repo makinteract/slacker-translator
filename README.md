@@ -14,6 +14,10 @@ modal before anything gets posted.
   bot key.
 - **`/removekey`** — (admins/owners only) delete the workspace's saved API
   key.
+- **"Translate to Korean" / "Translate to English"** — message shortcuts
+  (available from a message's `•••` menu). Translates that message and
+  replies with an ephemeral message visible only to the person who ran the
+  shortcut — nothing is posted for anyone else to see.
 
 For the slash commands, the bot opens a modal with the translation so you
 can edit it before posting it to the channel with the `response_url`
@@ -49,10 +53,15 @@ can edit it before posting it to the channel with the `response_url`
 
 3. In your Slack app configuration, set up:
    - Slash commands: `/english`, `/korean`, `/translate`, `/setkey`, `/removekey`
+   - Interactivity & Shortcuts → Shortcuts → create two **On messages**
+     shortcuts:
+     - "Translate to Korean" with callback ID `translate_to_korean`
+     - "Translate to English" with callback ID `translate_to_english`
    - Socket Mode enabled, with the scopes needed for `commands`, `chat:write`,
      `im:write`, opening/updating views (`views:*`), and `users:read` (used to
      check whether the caller of `/setkey`/`/removekey` is a workspace
-     admin/owner)
+     admin/owner). `chat:write` also covers posting the ephemeral
+     translations from the message shortcuts.
 
 4. Run the bot:
 

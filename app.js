@@ -311,6 +311,53 @@ registerLanguageSubmit('english_submit', 'English');
 registerLanguageSubmit('korean_submit', 'Korean');
 
 // --------------------------------------------------
+// HELPER: REGISTER A MESSAGE SHORTCUT
+// (translate a message in place, reply privately to the requester)
+// --------------------------------------------------
+
+function registerTranslateShortcut(callbackId, language) {
+  app.shortcut(callbackId, async ({ shortcut, ack, respond }) => {
+    await ack();
+
+    const teamId = shortcut.team?.id;
+    const text = shortcut.message?.text?.trim();
+
+    if (!text) {
+      await respond({
+        response_type: 'ephemeral',
+        text: 'That message has no text to translate.',
+      });
+
+      return;
+    }
+
+    try {
+      const translation = await translateText(text, language, teamId);
+
+      await respond({
+        response_type: 'ephemeral',
+        text: `*${language} translation (only visible to you):*\n${translation}`,
+      });
+    } catch (error) {
+      console.error(`${callbackId} error:`, error);
+
+      const failureText =
+        error.message === 'NO_API_KEY'
+          ? 'No OpenAI API key is configured for this workspace. Ask a workspace admin to run `/setkey`.'
+          : `Translation failed: ${error.message}`;
+
+      await respond({
+        response_type: 'ephemeral',
+        text: failureText,
+      });
+    }
+  });
+}
+
+registerTranslateShortcut('translate_to_korean', 'Korean');
+registerTranslateShortcut('translate_to_english', 'English');
+
+// --------------------------------------------------
 // WORKSPACE OPENAI API KEY
 // (admin/owner only — the key applies to the whole space)
 // --------------------------------------------------
